@@ -1,23 +1,41 @@
-# Czech Bank Loan Risk Analysis (SQL)
+# Bank Loan Credit Risk Analysis (SQL)
 
-Credit risk analysis on the Berka dataset (1993–1998 Czech bank data) using SQL;
-examining where loan portfolio risk concentrates, whether account behavior predicts 
-default, and whether debt burden at approval predicts default.
+**Where does a bank's loan risk sit, and which early signals separate loans that default from loans that perform?**
 
-**Data source:** [Hugging Face](https://huggingface.co/datasets/yifanmai/czech_bank_qa/tree/main) 
-(`czech_bank.db`) and open it directly in DB Browser for SQLite.
-
-**Tools:** SQLite, DB Browser for SQLite  
-**Loan status codes:** A = Finished–OK, B = Finished–Defaulted, C = Running–OK, D = Running–In Debt
+A SQL analysis of a real bank's loan portfolio and transaction history (Berka dataset, Czech bank, 1993-1998). 3 business questions, answered with standard SQL (CTEs, window functions, joins, CASE segmentation) in SQLite.
 
 ---
+
+## Key findings at a glance
+
+| # | Business question | Finding | Suggested action |
+|---|---|---|---|
+| 1 | Where is portfolio risk concentrated? | Performing loans are 59.1% of loans and 66.9% of exposure. Loans in arrears (behind on payments) are only 6.6% of loans but 10.9% of exposure. | Monitor large loans first, since arrears skew toward bigger tickets. |
+| 2 | Does account balance behavior signal default? | Lowest-balance quintile defaults at 15.0%, versus 0.41% in the highest (~37x gap). | Add average balance as a behavioral early-warning feature. |
+| 3 | Does payment burden signal default? | Default jumps from 2.3-3.5% to 9.41% once payment exceeds ~16% of average monthly credits. | Test a simple PTI (payment-to-income) cutoff as an underwriting rule. |
+
+**Takeaway:** balance behavior carries a gradual risk signal, while payment burden carries a threshold signal. They flag different kinds of risk, so a screen using both should catch more than either alone.
+
+---
+
+## Dataset and tools
+
+- **Data:** Berka dataset, an anonymized Czech bank database with 8 related tables (accounts, loans, transactions, clients, and others) and 1M+ transaction records.
+- **Source:** [Hugging Face](https://huggingface.co/datasets/yifanmai/czech_bank_qa/tree/main) (`czech_bank.db`), also available as [Kaggle CSVs](https://www.kaggle.com/datasets/marceloventura/the-berka-dataset)
+- **Tools:** SQLite, DB Browser for SQLite
+- **SQL techniques:** CTEs, window functions (`NTILE`, `SUM() OVER`), joins, `CASE` segmentation, aggregation
+- **Loan status codes:** A = Finished-OK, B = Finished-Defaulted, C = Running-OK, D = Running-In Debt (in arrears: still active, but behind on payments).
+- **Default definition used:** status B (finished and defaulted)
+
+---
+
 ## Q1: Where is risk concentrated in the loan portfolio?
 
-**Business context:** Before assessing individual loan risk, a portfolio manager needs 
-to know where the bank's money is currently sitting across loan outcomes.
+**Business problem:** A portfolio manager needs to know how the bank's money is spread across loan outcomes before deciding where to look more closely.
 
-**Decision this supports:** Informs which loan segments merit closer monitoring, and 
-whether the bank's largest exposures are concentrated in healthy or struggling loans.
+**Approach:** Group loans by status, then calculate each status's share of loan count and of total loan amount using a window function.
+
+**File:** `q1_portfolio_risk_exposure.sql`
 
 ```sql
 WITH status_summary AS (
@@ -40,7 +58,7 @@ FROM status_summary
 SELECT 
 status,
 CASE
-			WHEN status  = 'A' THEN 'Finished  - OK'
+			WHEN status  = 'A' THEN 'Finished - OK'
 			WHEN status = 'B' THEN 'Finished - Defaulted'
 			WHEN status = 'C' THEN 'Running - OK'
 			WHEN status = 'D' THEN 'Running - In Debt'
@@ -51,183 +69,159 @@ ROUND(loan_count * 100.0 / total_loan_all, 2) AS pct_loan,
 ROUND(loan_exposure * 100.0 / total_exposure_all, 2) AS pct_exposure
 FROM summary_with_total;
 ```
-**Finding:** Loans currently performing well (Running–OK) make up 59.1% of the loan book 
-by count and an even higher 66.9% of total exposure, the bank's largest loans skew 
-healthy. Loans currently in debt (Running–In Debt) are only 6.6% of loans by count but 
-10.9% of exposure, meaning these loans are larger than average; a concentration point 
-worth monitoring, since a small number of high value loans carry disproportionate 
-dollar risk if they convert to default.
 
-**Caveat:** Exposure is measured as original loan amount granted, not current 
-outstanding balance, so it reflects total capital placed at risk over the loan's life, 
-not what remains unpaid today.
+**Finding:** Running - OK loans make up 59.1% of loans and 66.9% of exposure, so the largest loans skew healthy. Running-In Debt loans / in arrears are only 6.6% of loans but 10.9% of exposure, which means they are larger than average.
+
+**Recommendation:** A small number of large loans carries disproportionate dollar risk if they convert to default. Prioritize monitoring by loan size within the In Debt group.
+
+**Limitation:** Exposure is the original loan amount, not the current outstanding balance.
 
 ---
 
-## Q2: Does account balance behavior predict default?
+## Q2: Does account balance behavior signal default?
 
-**Business context:** Traditional credit scoring relies on bank's history. Modern 
-lenders increasingly ask whether transaction behavior adds predictive signal on its own.
+**Business problem:** Credit decisions traditionally lean on application data. Does how a customer's balance behaves in their account add a useful signal on its own?
 
-**Decision this supports:** Whether balance based behavioral signals are worth 
-incorporating into a risk model alongside (or instead of) bank's data.
+**Approach:** Calculate each account's average balance across its transaction history, rank accounts into five equal-sized groups (quintiles) with `NTILE`, join to loan outcomes, and compare default rates across groups.
+
+**File:** `q2_balance_default_risk.sql`
 
 ```sql
 WITH avg_balance AS (
-SELECT
-account_id,
-AVG(balance) AS avg
-FROM trans
-GROUP BY account_id
+	SELECT
+	account_id,
+	AVG(balance) AS avg_bal
+	FROM trans
+	GROUP BY account_id
 )
-, bucket AS (
-SELECT
-account_id,
-avg,
-NTILE(5) OVER (ORDER BY avg) AS group_balance
-FROM avg_balance
+, quintile AS (
+	SELECT
+	account_id,
+	avg_bal,
+	NTILE(5) OVER (ORDER BY avg_bal) AS balance_quintile
+	FROM avg_balance
 )
 , loan_outcome AS (
-SELECT
-account_id,
-CASE
-			WHEN status = 'B' THEN 1 ELSE 0 END AS is_default
-FROM loan
+	SELECT
+		account_id,
+		CASE
+		WHEN status = 'B' THEN 1 ELSE 0 END AS is_default
+	FROM loan
 )
 , combined AS (
     SELECT
-        b.account_id,
-        b.avg,
-        b.group_balance,
+        q.account_id,
+        q.avg_bal,
+        q.balance_quintile,
         lo.is_default
-    FROM bucket b
-    JOIN loan_outcome lo ON b.account_id = lo.account_id
+    FROM quintile q
+    JOIN loan_outcome lo ON q.account_id = lo.account_id
 )
 SELECT
-    group_balance,
+    balance_quintile,
     COUNT(*) AS num_accounts,
     SUM(is_default) AS num_defaults,
     ROUND(AVG(is_default) * 100.0, 2) AS default_rate_pct
 FROM combined
-GROUP BY group_balance
-ORDER BY group_balance;
+GROUP BY balance_quintile
+ORDER BY balance_quintile;
 ```
 
-**Finding:** Accounts in the lowest balance quintile default at 15.0%, compared to just 
-0.41% for the highest balance quintile; roughly a 37x difference. The relationship 
-isn't perfectly linear across all five groups (quintile 3 defaults more than quintile 2), 
-but the gap between lowest and highest is large and consistent with balance behavior 
-carrying real predictive signal beyond what a bureau report alone would show.
+**Finding:** The lowest balance quintile defaults at 15%, compared with 0.41% for the highest, a gap of roughly 37x. The pattern is not perfectly smooth (quintile 3 defaults slightly more than quintile 2), but the gap between the extremes is large.
 
-**Caveat:** Group sizes are uneven (40 accounts in quintile 1 vs. 246 in quintile 5), 
-since accounts with loans skew toward higher balances overall, the 15% figure rests 
-on a smaller, noisier sample than the 0.41% figure.
+**Recommendation:** Average balance is worth testing as a behavioral early warning feature alongside conventional application data.
+
+**Limitations:**
+- Group sizes are uneven (40 loan accounts in quintile 1 versus 246 in quintile 5), so the 15% figure rests on a small sample.
+- Average balance is measured over the full transaction history, which can include the period after the loan was issued. A stricter version would use only pre-loan transactions.
 
 ---
 
-## Q3: Does debt-service burden at approval predict default?
+## Q3: Does payment burden signal default?
 
-**Business context:** A loan can look acceptable on size and term alone, and still be 
-unaffordable if the required payment consumes too much of the borrower's regular income.
+**Business problem:** A loan can look fine on size and term and still be unaffordable if its payment takes too large a share of the customer's regular income.
 
-**Decision this supports:** Whether an affordability check (payment ÷ income) at 
-underwriting would catch risk that loan size or term alone would miss.
+**Approach:** Build a payment-to-income (PTI) ratio: monthly loan payment divided by the account's average monthly credits (used as an income proxy). Split loans into quartiles by that ratio and compare default rates.
+
+**File:** `q3_debtburden_default.sql`
 
 ```sql
-WITH credit_account_sum AS (
-SELECT 
-			account_id,
-			SUBSTR(date, 1, 7) AS year_month,
-			sum(amount) AS credit_month
-FROM trans
-WHERE type = 'PRIJEM'
-GROUP BY account_id, year_month
-), credit_account_average AS (
-SELECT 
-			account_id,
-			ROUND(AVG(credit_month), 2) AS avg_cr_mo
-FROM credit_account_sum
-GROUP BY account_id
+WITH monthly_credits AS (
+    SELECT
+        account_id,
+        SUBSTR(date, 1, 7) AS year_month,
+        SUM(amount)        AS credit_month
+    FROM trans
+    WHERE type = 'PRIJEM'          --credit transactions
+    GROUP BY account_id, year_month
+),
+avg_credits AS (
+    SELECT
+        account_id,
+        ROUND(AVG(credit_month), 2) AS avg_monthly_credit
+    FROM monthly_credits
+    GROUP BY account_id
+),
+loan_ratio AS (
+    SELECT
+        l.account_id,
+        ROUND(l.payments / a.avg_monthly_credit, 2) AS pti_ratio,
+        CASE WHEN l.status = 'B' THEN 1 ELSE 0 END  AS is_default
+    FROM loan l
+    JOIN avg_credits a ON l.account_id = a.account_id
+),
+ratio_quartile AS (
+    SELECT
+        account_id,
+        pti_ratio,
+        NTILE(4) OVER (ORDER BY pti_ratio) AS quartile,
+        is_default
+    FROM loan_ratio
 )
-,loan_p_sts AS (
 SELECT
-account_id,
-payments,
-status
-FROM loan
-)
-, acc_p_avg_sts AS (
-SELECT 
-			l.account_id,
-			l.payments,
-			c.avg_cr_mo,
-			l.status
-FROM loan_p_sts l
-JOIN credit_account_average c ON l.account_id = c.account_id
-)
-, debt_group AS (
-SELECT 
-			account_id,
-			ROUND((payments / avg_cr_mo), 2) AS debt_ratio,
-			status,
-			CASE 
-						WHEN status = 'B' THEN 1 ELSE 0 END AS is_default
-FROM acc_p_avg_sts
-ORDER BY debt_ratio
-)
-, debt_quartile AS (
-SELECT 
-			account_id,
-			debt_ratio,
-			NTILE (4) OVER(ORDER BY debt_ratio) AS quartile,
-			is_default
-FROM debt_group
-)
-, default_quartile AS (
-SELECT
-			quartile,
-			COUNT(*) AS no_account,
-			ROUND(AVG(is_default) * 100.0, 2) AS defaulf_pct,
-			SUM(is_default) AS default_acc
-FROM debt_quartile
+    quartile,
+    COUNT(*)                          AS num_accounts,
+    SUM(is_default)                   AS num_defaults,
+    ROUND(AVG(is_default) * 100.0, 2) AS default_rate_pct,
+    MIN(pti_ratio)                    AS min_ratio,
+    MAX(pti_ratio)                    AS max_ratio
+FROM ratio_quartile
 GROUP BY quartile
-)
-SELECT 
-			quartile,
-			MIN(debt_ratio) AS min_ratio,
-			MAX(debt_ratio) AS max_ratio
-FROM debt_quartile
-GROUP BY quartile;
+ORDER BY quartile;
 ```
 
-**Finding:** Loans in the top debt-burden quartile (payment to credit ratio ≥ 0.16) 
-default at 9.41%, compared to a roughly flat 2.3 – 3.5% across the bottom three quartiles
-; a 3 – 4x jump once the ratio crosses 0.16. Unlike balance (from previous question or Q2),
-where risk declined gradually across all five groups, debt burden shows a threshold effect:
-risk stays stable, then rises sharply past one point. This suggests an affordability cutoff 
-could be a useful, simple underwriting rule on its own.
+**Finding:** Loans in the top quartile (PTI ratio of 0.16 or higher) default at 9.41%, compared with a roughly flat 2.3-3.5% across the bottom three quartiles, a 3-4x jump. Unlike balance in Q2, where risk declines gradually, payment burden shows a threshold: risk stays low, then rises sharply past one point.
 
-**Caveat:** A small number of top quartile accounts (highest debt-burden) show ratios above 
-1.0 (payment exceeding average credit amount), which may reflect income arriving outside the 
-tracked account rather than genuine unaffordability, worth investigating before treating 0.16 
-as a hard cutoff.
+**Recommendation:** A simple affordability cutoff could work as a first-pass underwriting rule. Validate the 0.16 threshold on more data before using it as a hard limit.
+
+**Limitations:**
+- Some top quartile accounts have ratios above 1.0, which may mean income arrives outside the tracked account rather than true unaffordability. Investigate these before setting a cutoff.
+- Income is measured over the full account history, not strictly at the time of approval.
 
 ---
 
-## Overall takeaway
+## Overall conclusions
 
-Three independent signals; balance level, balance-derived quintiles, and debt-service 
-burden, each carry real predictive relationship with default, but with different 
-*shapes*: balance risk declines gradually, while debt burden shows a sharp threshold. 
-This suggests a risk model combining both would likely outperform either alone, a 
-gradual signal (balance) plus a threshold flag (debt ratio ≥ 0.16) catch different 
-kinds of risk.
+1. Risk is concentrated in a few larger loans that are already in arrears (Q1).
+2. Low average balance is associated with much higher default rates (Q2).
+3. Payment burden shows a sharp threshold rather than a gradual slope (Q3).
+4. Balance behavior and payment burden capture different kinds of risk, balance behavior and payment burden appear to capture different kinds of risk, so combining them is a natural next test.
 
-**Option A — prebuilt database (fastest):**
-Download the ready-made SQLite file from [Hugging Face](https://huggingface.co/datasets/yifanmai/czech_bank_qa/tree/main) 
-(`czech_bank.db`) and open it directly in DB Browser for SQLite.
+## Scope and next steps
+**What this analysis shows:** relationships between balance behavior, payment burden and loan outcomes. It is descriptive analysis, which makes it a strong basis for choosing which signals to build into a predictive model.
 
-**Option B — build from source CSVs:**
-1. Download CSVs from the [Kaggle mirror](https://www.kaggle.com/datasets/marceloventura/the-berka-dataset)
-2. Import into SQLite via DB Browser (`File → Import → Table from CSV`, delimiter `;`)
-3. Run queries in `/queries/` against the resulting database
+**Method notes:**
+- Some segments are small, so rates are best read as directional, and the largest gaps (balance extremes, top PTI quartile) are the most reliable signals.
+- Balance and income are averaged over each account's full history. The next version will use only pre-loan transactions to mirror a real approval decision.
+
+**Next steps:** test a combined screen (balance signal plus PTI flag) on a hold-out set, and build a dashboard for the portfolio view.
+
+## How to reproduce
+
+**Option A (fastest):** Download `czech_bank.db` from [Hugging Face](https://huggingface.co/datasets/yifanmai/czech_bank_qa/tree/main) and open it in DB Browser for SQLite.
+
+**Option B (from source CSVs):**
+1. Download the CSVs from the [Kaggle mirror](https://www.kaggle.com/datasets/marceloventura/the-berka-dataset).
+2. In DB Browser, use `File > Import > Table from CSV` (delimiter `;`).
+
+Then run `q1_portfolio_risk_exposure.sql`, `q2_balance_default_risk.sql` and `q3_debt_burden_default.sql` from this repository against the database.
