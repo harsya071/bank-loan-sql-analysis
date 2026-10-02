@@ -1,5 +1,8 @@
 # Bank Loan Credit Risk Analysis (SQL)
 
+![Dashboard Preview](dashboard_berka.png)
+**[View the live interactive dashboard](https://datastudio.google.com/s/iMYuc-6D8YA)**
+
 **Where does a bank's loan risk sit, and which early signals separate loans that default from loans that perform?**
 
 A SQL analysis of a real bank's loan portfolio and transaction history (Berka dataset, Czech bank, 1993-1998). 3 business questions, answered with standard SQL (CTEs, window functions, joins, CASE segmentation) in SQLite.
