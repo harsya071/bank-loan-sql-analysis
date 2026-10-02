@@ -221,10 +221,10 @@ ORDER BY quartile;
 
 ## How to reproduce
 
-**Option A (fastest):** Download `czech_bank.db` from [Hugging Face](https://huggingface.co/datasets/yifanmai/czech_bank_qa/tree/main) and open it in DB Browser for SQLite.
+**Option 1:** Download combined database `czech_bank.db` from [Hugging Face](https://huggingface.co/datasets/yifanmai/czech_bank_qa/tree/main) and directly use it with SQL program.
 
-**Option B (from source CSVs):**
+**Option 2:**
 1. Download the CSVs from the [Kaggle mirror](https://www.kaggle.com/datasets/marceloventura/the-berka-dataset).
-2. In DB Browser, use `File > Import > Table from CSV` (delimiter `;`).
+2. Combine manually CSV files / tables.
 
-Then run `q1_portfolio_risk_exposure.sql`, `q2_balance_default_risk.sql` and `q3_debt_burden_default.sql` from this repository against the database.
+Then run queries `q1_portfolio_risk_exposure.sql`, `q2_balance_default_risk.sql` and `q3_debt_burden_default.sql` from this repo on the database.
